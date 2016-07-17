@@ -12,7 +12,8 @@ git fetch origin
 git log -p master
 git merge origin/master
 
-同：
-git fetch origin master:temp
-git diff temp
-git merge temp
+不同：
+git fetch origin master:temp 
+git diff temp 
+git merge temp 
+
