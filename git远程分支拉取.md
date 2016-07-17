@@ -12,7 +12,7 @@ git fetch origin
 git log -p master
 git merge origin/master
 
-同：
+windows fix 同：
 git fetch origin master:temp //git branch temp
 git diff temp
 git merge temp // temp 合并到 master
