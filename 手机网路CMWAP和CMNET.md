@@ -18,3 +18,26 @@ CMWAP有了部分限制，资费上也存在差别,据网上相关资料所知�
 ### CMNET:
 CMNET国家骨干网部分由北京、上海、广州、南京、武汉、成都、西安、沈阳八大省会城市节点构成。
 通过CMNET接入点可以接入中国移动CMNET网络，获得完全的Internet访问权。
+
+
+
+
+
+
+## 现在的手机接入点：
+QQBrower_x5/Subproject/CommonBaseModule/src/com/tencent/common/http/Apn.java
+现在移动4G和联通4G的接入点分别是CMNET 和 3GNET,电影应该是全面变成ctnet和ctlte
+移动WAP
+联通3G-wap
+联通wap
+电信net
+联通net
+联通3G-net
+移动net
+电信4G
+联通4G
+移动4G
+
+
+## 项目中手机网络接入类型
+NET WAP WIFI

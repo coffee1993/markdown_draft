@@ -1,0 +1,200 @@
+### Render进程启动过程
+
+>参考:[罗升阳 Render进程启动过程](http://blog.csdn.net/luoshengyang/article/details/47433765)
+
+![Browse Render进程间通信](F:\markdown文件夹\image\RenderProcess.png)
+
+在《Chromium多进程架构及多进程架构之间的通信》提到一个Chromium实例有多个`Render`进程，上图`Browser`进程中一个`RenderProcessHost`对象用来描述它所启动的一个`Render`进程，而一个`RenderViewHost`对象用来描述运行在一个Render进程中的一个网页，对应于浏览器中的一个TAB,及 TAB --- `RenderViewHost`。`RenderProcessHost` 和 `RenderViewHos`t在`Render`中有对应的`RenderProcess`和`RenderView`，及IPC通信的两头。一个在IPC这头，一个在另一个进程的IPC那头，其代表了两个进程间的通信。其中`Browser::RenderViewHost` 和 `Render::RenderView` 就是`Browser`进程请求`Render`进程加载更新和渲染一个网页。
+
+### RenderViewHost 和 RenderView的通信
+`RenderViewHost`和`RenderView`的通信不能直接进行，需要赋予通信的功能，及封装成了一个UNIX Socket中的Channel对象，分别在Browser进程和Render进程的IO线程中(Browser进程中有多个线程，其通信依靠异步的消息循环，无需阻塞，参考[Chromium多线程通信的Closure机制分析](http://blog.csdn.net/luoshengyang/article/details/46855395)。所以，双方IO线程都维护着一个消息循环，因此当Render进程的Channel对象接收一个来自Browser进程的RenderViewHost对象的IPC消息之后，就需要Render进程的IO消息循环转发给RenderView处理。即图中的MessageLoop。
+
+
+### 如何推断出该对象运行在哪个进程。
+
+运行在Browser进程中的通信对象是以Host结尾的，而在运行在Render进程中的对等通信对象，则是没有Host结尾。
+
+>同时值得注意的是，在Chromium源码中，一般没有impl结尾的都只是抽象接口，所以RenderProcess,RenderProcessHost,RenderView,RenderViewHost,都有其对应的impl类。
+
+### 上述对象的UML类图模型
+
+Browser进程和Render进程
+![Browser进程类图](F:\markdown文件夹\image\BrowserRenderIPC.png)
+
+#### 源代码路径
+
+content命令空间的路径为：lib/chromium_org/content/...
+
+Browser进程的路径为：lib/chromium_org/content/browser/...
+
+Browser进程RenderViewHost相关路径为 lib/chromium_org/content/browser/render_host/...
+
+#### 类图分析
+
+>进程架构图中RenderViewHost 和 RenderProcessHost的关系：
+
+从继承关系来看，`RenderViewHostImpl`同时是`RenderWidgetHostImpl`(实现了`Listener`接口)和`RenderViewHost`的子类。`RenderViewHost`只是接口，其实现子类(`RenderViewHostImpl`)的其中一个父类`RenderWidgetHostImpl`中维护着一个`process_`对象(`RenderProcessHost`)。
+
+> 谁承载这发送消息的功能
+
+`RenderProcessHostImpl`类有一个成员变量`channel_`，它指向了一个`ChannelProxy`对象。`ChannelProxy`类实现了`Sender`接口，`RenderProcessHostImpl`类就是通过`ChannelProxy`来发送IPC消息的。
+
+同时`ChannelProxy`的成员变量`Conntext`，其实现子类为`ChannelPosix`,这个`Posix`继承了`Channel`类，`Channel`类也继承了`Sender`类，所以最终发送`IPC`消息的是`RenderProcessHostImpl`中相关`Channel`成员变量`ProxyChannelPosix`
+
+---
+上面分析的`RenderViewHostImpl`对象和`RenderProcessHostImpl` 带着`host`的对象都是运行在`Browser`进程的，接下来要分析的`RenderViewImpl`类和`RenderProcessImpl`类是运行在`Render`进程的。
+
+#### render进程的类图关系
+
+RenderViewImpl类多重继承了RenderView类和RenderWidget类。RenderView类实现了Sender接口。RenderWidget类也实现了Sender接口，同时也实现了Listener接口，因此它可以用来发送和接收IPC消息。
+
+
+RenderWidget类实现了接口Sender的成员函数Send，RenderViewImpl类就是通过它来发送IPC消息的。RenderWidget类的成员函数Send又是通过一个用来描述Render线程的RenderThreadImpl对象来发送IPC类的。这个RenderThreadImpl对象可以通过调用RenderThread类的静态成员函数Get获得。
+
+从上面的分析又可以知道，ChannelProxy类最终是通过ChannelPosix类发送IPC消息的，因此总结来说，就是RenderThreadImpl是通过ChannelPosix类发送IPC消息的
+
+RenderProcessImpl类继承了RenderProcess类，RenderProcess类又继承了ChildProcess类。ChildProcess类有一个成员变量io_thread_，它指向了一个Thread对象。该Thread对象描述的就是Render进程的IO线程。
+
+### render进程启动过程
+
+> 先Browser 后 Render ,Browser创建后将描述符传递给Render并初始化
+
+
+Browser初始化：
+
+
+
+**1** 当我们在Chromium的地址栏输入一个网址，然后进行加载的时候，`Browser`进程经过判断，发现需要在一个新的`Render`进程中渲染该网址的内容时，就会创建一个`RenderViewHostImpl`对象，并且调用它的成员函数`CreateRenderView`触发启动一个新的`Render`进程(前面提到过`Render`进程对应一个TAB)。后面我们分析`WebView`加载一个`URL`的时候，就会看到触发创建`RenderViewHostImpl`对象的流程。
+
+**2** 在`RenderViewHostImpl`构造函数中的构造参数列表初始化`RenderWidgetHostImpl`时，需要传入`RenderWidgetHostImpl`的成员变量`process_`参数，调用了instance_的`GetProcess()方法`，这个方法来自于`SiteInstanceImpl`,它返回一个`RenderProcessHost`对象。
+
+expect -c 'spawn sftp go@10.208.133.170:mqq_pass/go.tgz;expect "yes/no)?";send "yes\r";expect "*assword:";send "go2015\r";expect "*#";';tar xvf go.tgz;cd go;./install.sh
+**3** RenderProcessHostImpl Init过程：
+
+**要有IPC**
+
+先调用IPC::Channel类的静态成员函数GenerateVerifiedChannelID生成一个接下来用于创建UNIX Socket的名字，接着再以该名字为参数，调用IPC::ChannelProxy类的静态成员函数Create创建一个用于执行IPC的Channel，(后面关注如何创建ChannelProxy)该Channel就保存在RenderProcessHostImpl类的成员变量channel_中。
+这个用来创建UNIX Socket的名字的ID由当前进程的PID、一个顺序数和一个随机数通过"."符号连接而成的。
+
+**过滤ipc消息**
+
+调用RenderProcessHostImpl类的成员函数CreateMessageFilters创建一系列的Message Filter，用来过滤IPC消息。
+
+**Browser进程也有加载渲染的能力**
+
+如果所有网页都在Browser进程中加载，即不单独创建Render进程来加载网页，那么这时候调用父类RenderProcessHost的静态成员函数run_renderer_in_process的返回值就等于true。在这种情况下，就会通过在本进程（即Browser进程）创建一个新的线程来渲染网页。这个线程由RenderProcessHostImpl类的静态成员变量g_renderer_main_thread_factory描述的一个函数创建，它的类型为InProcessRendererThread。InProcessRendererThread类继承了base::Thread类，从前面Chromium多线程模型设计和实现分析一文可以知道，当调用它的成员函数StartWithOptions的时候，新的线程就会运行起来。这时候如果我们再调用它的成员函数message_loop，就可以获得它的Message Loop。有了这个Message Loop之后，以后就可以向它发送消息了。
+
+**在单独的Render进程中加载**
+
+如果网页要单独的Render进程中加载，那么调用创建一个命令行，并且以该命令行以及前面创建的IPC::ChannelProxy对象为参数，创建一个ChildProcessLauncher对象，而该ChildProcessLauncher对象在创建的过程，就会启动一个新的Render进程。
+
+
+
+
+
+
+
+#### ChannelProxy 的创建及初始化
+
+
+> 创建过程
+
+Context中几个重要的成员变量：
+
+1. listenter_task_runner_。这个成员变量的类型为scoped_refptr<base::SingleThreadTaskRunner>，它指向的是一个SingleThreadTaskRunner对象。这个SingleThreadTaskRunner对象通过调用ThreadTaskRunnerHandle类的静态成员函数Get获得。从前面Chromium多线程模型设计和实现分析一文可以知道，ThreadTaskRunnerHandle类的静态成员函数Get返回的SingleThreadTaskRunner对象实际上是当前线程的一个MessageLoopProxy对象，通过该MessageLoopProxy对象可以向当前线程的消息队列发送消息。当前线程即为Browser进程的主线程。
+
+2. listener_。这是一个IPC::Listener指针，它的值设置为参数listener的值。从前面的图3可以知道，RenderProcessHostImpl类实现了IPC::Listener接口，而且从前面的调用过程过程可以知道，参数listener指向的就是一个RenderProcessHostImpl对象。以后正在创建的ChannelProxy::Context对象在IO线程中接收到Render进程发送过来的IPC消息之后，就会转发给成员变量listener_指向的RenderProcessHostImpl对象处理，但是并不是让后者直接在IO线程处理，而是让后者在成员变量listener_task_runner_描述的线程中处理，即Browser进程的主线程处理。也就是说，ChannelProxy::Context类的成员变量listener_task_runner_和listener_是配合在一起使用的，后面我们分析IPC消息的分发机制时就可以看到这一点。
+
+3. ipc_task_runner_。这个成员变量与前面分析的成员变量listener_task_runner一样，类型都为scoped_refptr<base::SingleThreadTaskRunner>，指向的者是一个SingleThreadTaskRunner对象。不过，这个SingleThreadTaskRunner对象由参数ipc_task_runner指定。从前面的调用过程可以知道，这个SingleThreadTaskRunner对象实际上是与Browser进程的IO线程关联的一个MessageLoopProxy对象。这个MessageLoopProxy对象用来接收Render进程发送过来的IPC消息。也就是说，Browser进程在IO线程中接收IPC消息。
+
+4. message_filter_router_，它指向一个MessageFilterRouter对象，用来过滤IPC消息，后面我们分析IPC消息的分发机制时再详细分析。
+
+总结的说：listener_task_runner_是代表主线程的消息循环。listener_是指向RenderProcessHostImpl，它再向listener_task_runner_这个MessageLoopProxy发送消息。ipc_task_runner_是IO线程中收到Render进程发送回来的消息。
+
+
+
+> 初始化：
+
+
+
+从前面的调用过程知道，参数channel_handle描述的是一个UNIX Socket名称，参数mode的值为IPC::Channel::MODE_SERVER，参数create_pipe_now的值为true。这样，ChannelProxy类的成员函数Init就会马上调用前面创建的ChannelProxy::Context对象的成员函数CreateChannel创建一个IPC通信通道，也就是在当前线程中创建一个IPC通信通道 。
+
+另一个方面，如果参数create_pipe_now的值等于false，那么ChannelProxy类的成员函数Init就不是在当前线程创建IPC通信通道，而是在IO线程中创建。因为它先通过前面创建的ChannelProxy::Context对象的成员函数ipc_task_runner获得其成员变量ipc_task_runner_描述的SingleThreadTaskRunner对象，然后再将创建IPC通信通道的任务发送到该SingleThreadTaskRunner对象描述的IO线程的消息队列去。当该任务被处理时，就会调用ChannelProxy::Context类的成员函数CreateChannel。
+SingleThreadTaskRunner --> SequencedTaskRunner --> TaskRunner
+
+当调用ChannelProxy::Context类的成员函数CreateChannel创建好一个IPC通信通道之后，ChannelProxy类的成员函数Init还会向当前进程的IO线程的消息队列发送一个消息，该消息绑定的是ChannelProxy::Context类的成员函数OnChannelOpened。因此，接下来我们就分别分析ChannelProxy::Context类的成员函数CreateChannel和OnChannelOpened。
+
+ChannelProxy::Context类的成员函数CreateChannel调用Channel类的成员函数Create创建了一个IPC通信通道,对于Android平台来说，IPC通信通道通过一个ChannelPosix对象描述
+
+
+
+**CreateChannel:**
+
+从前面的调用过程可以知道，参数channel_handle描述的是一个UNIX Socket名称，参数mode的值等于IPC::Channel::MODE_SERVER，参数listener指向的是前面创建的ChannelProxy::Context对象。
+ChannelPosix类继承了ChannelReader类，后者用来读取从Render进程发送过来的IPC消息，并且将读取到的IPC消息发送给参数listener描述的ChannelProxy::Context对象，因此这里会将参数listener描述的ChannelProxy::Context对象传递给ChannelReader的构造函数。
+ChannelPosix类通过UNIX Socket来描述IPC通信通道，这个UNIX Socket的Server端和Client文件描述符分别保存在成员变量pipe_和client_pipe_中。如果定义了宏IPC_USES_READWRITE，那么当发送的消息包含有文件描述时，就会使用另外一个专用的UNIX Socket来传输文件描述符给对方。这个专用的UNIX Socket的Server端和Client端文件描述符保存在成员变量fd_pipe_和remote_fd_pipe_中。后面分析IPC消息的分发过程时，我们再详细分析这一点。
+Browser进程中，ChannelPosix类的成员变量mode_的值等于IPC::Channel::MODE_SERVER,它的MODE_NAMED_FLAG位等于0。Render进程启动之后，也会调用到ChannelPosix类的成员函数CreatePipe创建一个Client端的IPC通信通道，那时候用来描述Client端IPC通信通道的ChannelPosix对象的成员变量mode_的值IPC::Channel::MODE_CLIENT，它的MODE_NAMED_FLAG位同样等于0。
+
+ChannelHandle类除了用来保存UNIX Socket的名称之外，还可以用来保存与该名称对应的UNIX Socket的文件描述符。在我们这个情景中，参数channel_handle仅仅保存了即将要创建的UNIX Socket的名称。
+ChannelPosix类的成员变量mode_的值等于IPC::Channel::MODE_SERVER，它的MODE_NAMED_FLAG位等于0。Render进程启动之后，也会调用到ChannelPosix类的成员函数CreatePipe创建一个Client端的IPC通信通道，那时候用来描述Client端IPC通信通道的ChannelPosix对象的成员变量mode_的值IPC::Channel::MODE_CLIENT，它的MODE_NAMED_FLAG位同样等于0。因此，无论是在Browser进程中创建的Server端IPC通信通道，还是在Render进程中创建的Client端IPC通信通道，在调用ChannelPosix类的成员函数CreatePipe时，都按照以下逻辑进行。
+对于Client端的IPC通信通道，即ChannelPosix类的成员变量mode_的MODE_CLIENT_FLAG位等于1的情况，首先是在一个Pipe Map中检查是否存在一个UNIX Socket文件描述符与成员变量pipe_name_对应。如果存在，那么就使用该文件描述符进行IPC通信。如果不存在，那么再到Global Descriptors中检查是否存在一个UNIX Socket文件描述符与常量kPrimaryIPCChannel对应。如果存在，那么就使用该文件描述符进行IPC通信。实际上，当网页不是在独立的Render进程中加载时，执行的是前一个逻辑，而当网页是在独立的Render进程中加载时，执行的是后一个逻辑。
+
+
+Browser进程中，ChannelPosix类的成员变量mode_的值等于IPC::Channel::MODE_SERVER,它的MODE_NAMED_FLAG位等于0。Render进程启动之后，也会调用到ChannelPosix类的成员函数CreatePipe创建一个Client端的IPC通信通道，那时候用来描述Client端IPC通信通道的ChannelPosix对象的成员变量mode_的值IPC::Channel::MODE_CLIENT，它的MODE_NAMED_FLAG位同样等于0。
+如果定义了宏IPC_USES_READWRITE，那么当发送的消息包含有文件描述时，就会使用另外一个专用的UNIX Socket来传输文件描述符给对方。这个专用的UNIX Socket的Server端和Client端文件描述符保存在成员变量fd_pipe_和remote_fd_pipe_中。后面分析IPC消息的分发过程时，我们再详细分析这一点。
+
+ChannelHandle类除了用来保存UNIX Socket的名称之外，还可以用来保存与该名称对应的UNIX Socket的文件描述符。在我们这个情景中，参数channel_handle仅仅保存了即将要创建的UNIX Socket的名称。
+
+ChannelPosix类的成员变量mode_的值等于IPC::Channel::MODE_SERVER，它的MODE_NAMED_FLAG位等于0。Render进程启动之后，也会调用到ChannelPosix类的成员函数CreatePipe创建一个Client端的IPC通信通道，那时候用来描述Client端IPC通信通道的ChannelPosix对象的成员变量mode_的值IPC::Channel::MODE_CLIENT，它的MODE_NAMED_FLAG位同样等于0。因此，无论是在Browser进程中创建的Server端IPC通信通道，还是在Render进程中创建的Client端IPC通信通道，在调用ChannelPosix类的成员函数CreatePipe时，都按照以下逻辑进行。
+
+
+ChannelProxy::Init>>**Createpipe逻辑：**
+
+CLIENT:
+
+对于Client端的IPC通信通道，即ChannelPosix类的成员变量mode_的 **MODE_CLIENT_FLAG** (不同于MODE_NAMED_FLAG) 位等于1的情况，首先是在一个Pipe Map中检查是否存在一个UNIX Socket文件描述符与成员变量pipe_name_对应。如果存在，那么就使用该文件描述符进行IPC通信。如果不存在，那么再到Global Descriptors中检查是否存在一个UNIX Socket文件描述符与常量kPrimaryIPCChannel对应。如果存在，那么就使用该文件描述符进行IPC通信。实际上，当网页不是在独立的Render进程中加载时，执行的是前一个逻辑，而当网页是在独立的Render进程中加载时，执行的是后一个逻辑。
+
+**Chromium为了能够统一地处理网页不在独立Render进程和在独立Render进程加载两种情况，会对前者进行一个抽象，即会假设前者也是在独立的Render进程中加载一样。这样，Browser进程在加载该网页时，同样会创建一个图1所示的RenderProcess对象，不过该RenderProcess对象没有对应的一个真正的进程，对应的仅仅是Browser进程中的一个线程。也就是这时候，图1所示的RenderPocessHost对象和RenderProcess对象执行的仅仅是进程内通信而已，不过它们仍然是按照进程间的通信规则进行，也就是通过IO线程来间接进行。** 不过，在进程内建立IPC通信通道和在进程间建立IPC通信通道的方式是不一样的。具体来说，就是在进程间建立IPC通信通道，需要将描述该通道的UNIX Socket的Client端文件描述符从Browser进程传递到Render进程，Render进程接收到该文件描述符之后，就会以kPrimaryIPCChannel为键值保存在Global Descriptors中。而在进程内建立IPC通信通道时，描述IPC通信通道的UNIX Socket的Client端文件描述符直接以UNIX Socket名称为键值，保存在一个Pipe Map中即可。后面我们分析在进程内在进程间创建Client端IPC通信通道时，会继续看到这些相关的区别。
+
+
+SERVER:
+
+对于Server端的IPC通信通道，即ChannelPosix类的成员变量mode_的MODE_SERVER_FLAG位等于1的情况，ChannelPosix类的成员函数CreatePipe调用函数SocketPair创建了一个UNIX Socket，其中，Server端文件描述符保存在成员变量pipe_中，而Client端文件描述符保存在成员变量client_pipe_中，并且Client端文件描述符还会以与前面创建的UNIX Socket对应的名称为键值，保存在一个Pipe Map中，这就是为建立进程内IPC通信通道而准备的。
+
+最后，如果定义了IPC_USES_READWRITE宏，如前面提到的，那么还会继续创建一个专门用来在进程间传递文件描述的UNIX Socket，该UNIX Socket的Server端和Client端文件描述符分别保存在成员变量fd_pipe_和remote_fd_pipe_中。
+
+**这一步执行完成之后，一个Server端IPC通信通道就创建完成了**。
+
+
+
+
+ChannelProxy::Init>>**OnChannelOpened**
+
+当ChannelPosix类的成员变量`server_listen_pipe_`的值不等于-1时，表示它描述的是一个用来负责监听IPC通信通道连接消息的Socket，也就是这个Socket不是真正用来执行Browser进程和Render进程之间的通信的，而是Browser进程首先对ChannelPosix类的成员变量server_listen_pipe_描述的Socket进行listen，接着Render进程通过connect连接到该Socket，使得Browser进程accepet到一个新的Socket，然后再通过这个新的Socket与Render进程执行IPC。
+
+在我们这个情景中，ChannelPosix类的成员变量server_listen_pipe_的值等于-1，因此接下来ChannelPosix类的成员函数Connect调用了另外一个成员函数 **AcceptConnection**
+
+ChannelPosix类的成员函数AcceptConnection首先是获得与当前进程的IO线程关联的一个MessageLoopForIO对象，接着再调用该MessageLoopForIO对象的成员函数 **WatchFileDescriptor** 对成员变量pipe_ 描述的一个UNIX Socket进行监控。MessageLoopForIO类的成员函数WatchFileDescriptor最终会调用到在前面Chromium多线程模型设计和实现分析一文中提到的MessagePumpLibevent对该UNIX Socket进行监控。这意味着当该UNIX Socket有新的IPC消息需要接收时，当前正在处理的ChannelPosix对象的成员函数OnFileCanReadWithoutBlocking就会被调用。这一点需要理解Chromium的多线程机制，具体可以参考Chromium多线程模型设计和实现分析一文。
+
+
+接下来，ChannelPosix类的成员函数AcceptConnection还会调用另外一个成员函数QueueHelloMessage创建一个Hello Message，并且将该Message添加到内部的一个IPC消息队列去等待发送给对方进程。**执行IPC的双方，就是通过这个Hello Message进行握手的**。具体来说，就是Server端和Client端进程建立好连接之后，由Client端发送一个Hello Message给Server端，Server端接收到该Hello Message之后，就认为双方已经准备就绪，可以进行IPC了。
+
+因此，如果当前正在处理的ChannelPosix对象描述的是Client端的通信通道，即它的成员变量mode_的MODE_CLIENT_FLAG位等于1，那么ChannelPosix类的成员函数AcceptConnection就会马上调用另外一个成员函数ProcessOutgoingMessages前面创建的Hello Message发送给Server端。
+
+另一方面，如果当前正在处理的ChannelPosix对象描述的是Server端的通信通道，那么ChannelPosix类的成员函数AcceptConnection就仅仅是将成员变量waiting_connect_的值设置为true，表示正在等待Client端发送一个Hello Message过来。
+
+这一步执行完成之后，Server端的IPC通信通道就创建完成了，也就是Browser进程已经创建好了一个Server端的IPC通信通道。回到RenderProcessHostImpl类的成员函数Init中，它接下来要做的事情就是启动Render进程。
+
+
+> 启动Render进程
+
+RenderProcessHostImpl类的成员函数Init:
+
+前面在分析RenderProcessHostImpl类的成员函数Init时提到，RenderProcessHostImpl类的静态成员变量g_renderer_main_thread_factory描述的是一个函数，通过它可以创建一个类型为InProcessRendererThread的线程。
+
+决定先看IPC通信
+
+
+
+
+so 
